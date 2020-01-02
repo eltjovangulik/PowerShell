@@ -49,12 +49,10 @@ $clientSecret = "clientSecret"
 $customer = "customerID"
 
 #define variables
-# https://support.citrix.com/article/CTX26199
 $internalConnectivity=$false
 $externalConnectivity=$false
 $internalBeacon="cloudconnector.internal.local"
 $globalNLSSites = @("HeadOffice")
-
 
 #test is we can reach the beacon to determine if we have internal network connection
 if((Test-NetConnection $internalBeacon).PingSucceeded -eq $true){
@@ -62,56 +60,61 @@ if((Test-NetConnection $internalBeacon).PingSucceeded -eq $true){
     $internalConnectivity=$true
 }
 
+try{
+    #if externalConnectivity
+    #retrieve the external IP address
+    $externalIP=(Invoke-WebRequest -uri "http://ifconfig.me/ip").Content;
+    Write-Debug $externalIP
+    #retrieve additional information 
+    $externalIPInfo=Invoke-RestMethod -Uri ('http://ipinfo.io/'+(Invoke-WebRequest -uri "http://ifconfig.me/ip").Content)
+    Write-Debug $externalIPInfo
 
-#if externalConnectivity
-#retrieve the external IP address
-$externalIP=(Invoke-WebRequest -uri "http://ifconfig.me/ip").Content;
-Write-Debug $externalIP
-#retrieve additional information 
-$externalIPInfo=Invoke-RestMethod -Uri ('http://ipinfo.io/'+(Invoke-WebRequest -uri "http://ifconfig.me/ip").Content)
-Write-Debug $externalIPInfo
+    # Connect to NLS
+    Connect-NLS -clientId $clientId -clientSecret $clientSecret -customer $customer
 
-# Connect to NLS
-Connect-NLS -clientId $clientId -clientSecret $clientSecret -customer $customer
+    # If InternalConnectivity and NOT in current NLS scope create custom NLS
+    If($internalConnectivity) {
+        # Get all NLS Sites and check if there is an existing entry for this IP
+        $allNLSSites = Get-NLSSite
 
-# If InternalConnectivity and NOT in current NLS scope create custom NLS
-If($internalConnectivity) {
-    # Get all NLS Sites and check if there is an existing entry for this IP
-    $allNLSSites = Get-NLSSite
+        $nlsExists = $false
 
-    $nlsExists = $false
-
-    # Iterate through all sites and check if current IP is included in existing NLS Sites
-    foreach($nlsSite in $allNLSSites) {
-        $ipv4Ranges = $nlsSite.ipv4Ranges
+        # Iterate through all sites and check if current IP is included in existing NLS Sites
+        foreach($nlsSite in $allNLSSites) {
+            $ipv4Ranges = $nlsSite.ipv4Ranges
     
-        foreach($ipv4Range in $ipv4Ranges) {
-            if((IS-InSubnet -ipaddress $externalIP -Cidr $ipv4Range)){
-                $nlsExists = $true
+            foreach($ipv4Range in $ipv4Ranges) {
+                if((IS-InSubnet -ipaddress $externalIP -Cidr $ipv4Range)){
+                    $nlsExists = $true
+                }
             }
+        }
+
+        # If current IP is not included in current NLS Site, create NLS Site for this specific IP
+        if(-not $nlsExists){
+            New-NLSSite -name "$($externalIP)" -tags @("CustomNLS") -timezone "$($externalIPInfo.timezone)" -ipv4Ranges @("$($externalIP)/32") -longitude $externalIPInfo.loc.Split(",")[1] -latitude $externalIPInfo.loc.Split(",")[0]
         }
     }
 
-    # If current IP is not included in current NLS Site, create NLS Site for this specific IP
-    if(-not $nlsExists){
-        New-NLSSite -name "$($externalIP)" -tags @("CustomNLS") -timezone "$($externalIPInfo.timezone)" -ipv4Ranges @("$($externalIP)/32") -longitude $externalIPInfo.loc.Split(",")[1] -latitude $externalIPInfo.loc.Split(",")[0]
-    }
-}
+    # If NOT InternalConnectivity check if NLS Site for current IP exists and delete site if not in pre-defined NLS Site list
+    if(-not $internalConnectivity) {
+        # Get all NLS Sites (excluding global NLS Sites) and check if there is an existing entry for this IP
+        $allNLSSites = Get-NLSSite | Where-Object {$globalNLSSites -notcontains $_.name}
 
-# If NOT InternalConnectivity check if NLS Site for current IP exists and delete site if not in pre-defined NLS Site list
-if(-not $internalConnectivity) {
-    # Get all NLS Sites (excluding global NLS Sites) and check if there is an existing entry for this IP
-    $allNLSSites = Get-NLSSite | Where-Object {$globalNLSSites -notcontains $_.name}
-
-    # Iterate through all sites and check if current IP is included in existing NLS Sites
-    foreach($nlsSite in $allNLSSites) {
-        $ipv4Ranges = $nlsSite.ipv4Ranges
+        # Iterate through all sites and check if current IP is included in existing NLS Sites
+        foreach($nlsSite in $allNLSSites) {
+            $ipv4Ranges = $nlsSite.ipv4Ranges
     
-        foreach($ipv4Range in $ipv4Ranges) {
-            # If current IP is included in existing NLS Site, remove NLS Site
-            if((IS-InSubnet -ipaddress $externalIP -Cidr $ipv4Range)){
-                (Get-NLSSite | Where-Object { $_.name -eq $nlsSite.name }) | Remove-NLSSite
+            foreach($ipv4Range in $ipv4Ranges) {
+                # If current IP is included in existing NLS Site, remove NLS Site
+                if((IS-InSubnet -ipaddress $externalIP -Cidr $ipv4Range)){
+                    (Get-NLSSite | Where-Object { $_.name -eq $nlsSite.name }) | Remove-NLSSite
+                }
             }
         }
     }
+} catch [System.Net.WebException] {
+    $_.Exception.Message
+} catch [System.Management.Automation.ParameterBindingException] {
+    $_.Exception.Message
 } 
